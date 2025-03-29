@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.FunctionCalling;
 using Microsoft.SemanticKernel.Diagnostics;
+using Microsoft.SemanticKernel.Planning;
 
 namespace Microsoft.SemanticKernel.Connectors.Amazon.Core;
 
