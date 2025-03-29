@@ -5,8 +5,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime.Documents;
 using Microsoft.SemanticKernel.ChatCompletion;
 
 namespace Microsoft.SemanticKernel.Connectors.Amazon.Core;
@@ -16,13 +19,47 @@ namespace Microsoft.SemanticKernel.Connectors.Amazon.Core;
 /// </summary>
 internal static class BedrockModelUtilities
 {
+    private const string PngMimeType = "image/png";
+    private const string JpegMimeType = "image/jpeg";
+    private const string GifMimeType = "image/gif";
+    private const string WebpMimeType = "image/webp";
+    private const string DocMimeType = "application/msword";
+    private const string DocxMimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    private const string PdfMimeType = "application/pdf";
+    private const string XlsMimeType = "application/vnd.ms-excel";
+    private const string XlsxMimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    private const string MpegMimeType = "video/mpeg";
+    private const string Mp4MimeType = "video/mp4";
+    private const string WebmMimeType = "video/webm";
+    private const string ThreeGpMimeType = "video/3gpp";
+    private const string MovMimeType = "video/quicktime";
+
+    private static readonly HashSet<string> s_supportedMimeTypes = [
+        PngMimeType,
+        JpegMimeType,
+        GifMimeType,
+        WebpMimeType,
+        DocMimeType,
+        DocxMimeType,
+        PdfMimeType,
+        XlsMimeType,
+        XlsxMimeType,
+        Mp4MimeType,
+        MpegMimeType,
+        WebmMimeType,
+        ThreeGpMimeType,
+        MovMimeType
+    ];
+
+
     /// <summary>
     /// Maps the AuthorRole to the corresponding ConversationRole because AuthorRole is static and { readonly get; }. Only called if AuthorRole is User or Assistant (System set outside/beforehand).
     /// </summary>
     /// <param name="role">The AuthorRole to be converted to ConversationRole</param>
+    /// <param name="toolResultsPresent">True if tool results are present in the message, false otherwise</param>
     /// <returns>The corresponding ConversationRole</returns>
     /// <exception cref="ArgumentOutOfRangeException">Thrown if invalid role.</exception>
-    internal static ConversationRole MapAuthorRoleToConversationRole(AuthorRole role)
+    internal static ConversationRole MapAuthorRoleToConversationRole(AuthorRole role, bool toolResultsPresent = false)
     {
         if (role == AuthorRole.User)
         {
@@ -32,6 +69,11 @@ internal static class BedrockModelUtilities
         if (role == AuthorRole.Assistant)
         {
             return ConversationRole.Assistant;
+        }
+
+        if (role == AuthorRole.Tool)
+        {
+            return toolResultsPresent ? ConversationRole.User : ConversationRole.Assistant;
         }
 
         throw new ArgumentOutOfRangeException($"Invalid role: {role}");
@@ -53,6 +95,8 @@ internal static class BedrockModelUtilities
     private static bool IsContentSupported(KernelContent content)
     {
         return content is TextContent ||
+               content is FunctionCallContent ||
+               content is FunctionResultContent ||
                (content is ImageContent image && image.DataUri != null) ||
                (content is PdfContent pdf && pdf.DataUri != null) ||
                (content is DocContent doc && doc.DataUri != null) ||
@@ -71,6 +115,96 @@ internal static class BedrockModelUtilities
         };
     }
 
+    private static ToolResultContentBlock CreateImageContentBlock(ImageFormat format, byte[] data)
+    {
+        return new ToolResultContentBlock
+        {
+            Image = new ImageBlock
+            {
+                Format = format,
+                Source = new ImageSource
+                {
+                    Bytes = new MemoryStream(data)
+                }
+            }
+        };
+    }
+    private static ToolResultContentBlock CreateDocumentContentBlock(DocumentFormat format, string ext, byte[] data)
+    {
+        return new ToolResultContentBlock
+        {
+            Document = new DocumentBlock
+            {
+                Format = format,
+                Name = $"document.{ext}",
+                Source = new DocumentSource
+                {
+                    Bytes = new MemoryStream(data)
+                }
+            }
+        };
+    }
+
+    private static ToolResultContentBlock CreateVideoContentBlock(VideoFormat format, byte[] data)
+    {
+        return new ToolResultContentBlock
+        {
+            Video = new VideoBlock
+            {
+                Format = format,
+                Source = new VideoSource
+                {
+                    Bytes = new MemoryStream(data)
+                }
+            }
+        };
+    }
+
+
+    private static IEnumerable<ToolResultContentBlock> ConvertResultToToolResultContentBlocks(object? result)
+    {
+        if (result is string text)
+        {
+            var match = Regex.Match(text, "data:(?<type>.+?);base64,(?<data>.+)");
+            if (match.Groups.Count >= 3 && s_supportedMimeTypes.Contains(match.Groups["type"].Value))
+            {
+                var data = match.Groups["data"].Value;
+                var bytes = Convert.FromBase64String(data);
+                yield return match.Groups["type"].Value switch
+                {
+                    PngMimeType => CreateImageContentBlock(ImageFormat.Png, bytes),
+                    JpegMimeType => CreateImageContentBlock(ImageFormat.Jpeg, bytes),
+                    GifMimeType => CreateImageContentBlock(ImageFormat.Gif, bytes),
+                    WebpMimeType => CreateImageContentBlock(ImageFormat.Webp, bytes),
+                    DocMimeType => CreateDocumentContentBlock(DocumentFormat.Doc, "doc", bytes),
+                    DocxMimeType => CreateDocumentContentBlock(DocumentFormat.Docx, "docx", bytes),
+                    PdfMimeType => CreateDocumentContentBlock(DocumentFormat.Pdf, "pdf", bytes),
+                    XlsMimeType => CreateDocumentContentBlock(DocumentFormat.Xls, "xls", bytes),
+                    XlsxMimeType => CreateDocumentContentBlock(DocumentFormat.Xlsx, "xlsx", bytes),
+                    MpegMimeType => CreateVideoContentBlock(VideoFormat.Mpeg, bytes),
+                    Mp4MimeType => CreateVideoContentBlock(VideoFormat.Mp4, bytes),
+                    WebmMimeType => CreateVideoContentBlock(VideoFormat.Webm, bytes),
+                    ThreeGpMimeType => CreateVideoContentBlock(VideoFormat.Three_gp, bytes),
+                    MovMimeType => CreateVideoContentBlock(VideoFormat.Mov, bytes),
+                    _ => throw new InvalidOperationException($"Unsupported image format: '{match.Groups["type"].Value}'"),
+                };
+            }
+
+            yield return new ToolResultContentBlock { Text = text };
+        }
+
+        if (result is Exception e)
+        {
+            yield return new ToolResultContentBlock { Text = e.Message };
+            yield return new ToolResultContentBlock { Text = e.StackTrace };
+        }
+
+        yield return new ToolResultContentBlock
+        {
+            Text = JsonSerializer.Serialize(result)
+        };
+    }
+
     private static IEnumerable<ContentBlock> MessageContentItemsToContentBlock(ChatMessageContentItemCollection items)
     {
         return items.Where(IsContentSupported)
@@ -79,6 +213,30 @@ internal static class BedrockModelUtilities
                 if (item is TextContent text)
                 {
                     return new ContentBlock { Text = text.Text };
+                }
+                if (item is FunctionCallContent functionCall)
+                {
+                    return new ContentBlock
+                    {
+                        ToolUse = new ToolUseBlock
+                        {
+                            Name = FunctionName.ToFullyQualifiedName(functionCall.FunctionName, functionCall.PluginName),
+                            Input = Document.FromObject(functionCall.Arguments),
+                            ToolUseId = functionCall.Id,
+                        }
+                    };
+                }
+                if (item is FunctionResultContent functionResult)
+                {
+                    return new ContentBlock
+                    {
+                        ToolResult = new ToolResultBlock
+                        {
+                            ToolUseId = functionResult.CallId,
+                            Content = [.. ConvertResultToToolResultContentBlocks(functionResult.Result)],
+                            Status = functionResult.Result is Exception ? ToolResultStatus.Error : ToolResultStatus.Success,
+                        }
+                    };
                 }
                 if (item is ImageContent image)
                 {
@@ -168,7 +326,7 @@ internal static class BedrockModelUtilities
             .Where(m => m.Role != AuthorRole.System)
             .Select(m => new Message
             {
-                Role = MapAuthorRoleToConversationRole(m.Role),
+                Role = MapAuthorRoleToConversationRole(m.Role, m.Items.Any(i => i is FunctionResultContent)),
                 Content = [.. MessageContentItemsToContentBlock(m.Items)]
             })];
     }

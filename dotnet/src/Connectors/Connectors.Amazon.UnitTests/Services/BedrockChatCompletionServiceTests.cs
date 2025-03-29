@@ -2,12 +2,16 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime.Documents;
 using Amazon.Runtime.Endpoints;
+using Amazon.Runtime.EventStreams.Internal;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Services;
 using Moq;
@@ -443,6 +447,180 @@ public sealed class BedrockChatCompletionServiceTests
         await service.GetChatMessageContentsAsync(chatHistory).ConfigureAwait(true);
         // Ensure that the method handles empty messages gracefully (e.g., by skipping them)
         // and doesn't throw an exception
+    }
+
+    private sealed class TestPlugin
+    {
+        [KernelFunction()]
+        [Description("Given a document title, look up the corresponding document ID for it.")]
+        [return: Description("The identified document if found, or an empty string if not.")]
+        public string FindDocumentIdForTitle(
+            [Description("The title to retrieve a corresponding ID for")]
+            string title
+        )
+        {
+            return $"{title}-{Guid.NewGuid()}";
+        }
+    }
+
+    [Fact]
+    public async Task ShouldHandleToolsInConverseRequestAsync()
+    {
+        // Arrange
+        ConverseRequest? firstRequest = null;
+        ConverseRequest? secondRequest = null;
+        var mockBedrockApi = new Mock<IAmazonBedrockRuntime>();
+        mockBedrockApi.Setup(m => m.DetermineServiceOperationEndpoint(It.IsAny<ConverseRequest>()))
+            .Returns(new Endpoint("https://bedrock-runtime.us-east-1.amazonaws.com")
+            {
+                URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
+            });
+        mockBedrockApi.Setup(m => m.ConverseAsync(It.IsAny<ConverseRequest>(), It.IsAny<CancellationToken>()))
+            .Callback((ConverseRequest request, CancellationToken token) =>
+            {
+                if (firstRequest == null)
+                {
+                    firstRequest = request;
+                }
+                else
+                {
+                    secondRequest = request;
+                }
+            })
+            .ReturnsAsync((ConverseRequest request, CancellationToken _) =>
+            {
+                return secondRequest == null
+                    ? new ConverseResponse
+                    {
+                        Output = new ConverseOutput
+                        {
+                            Message = new Message
+                            {
+                                Role = ConversationRole.Assistant,
+                                Content = [ new() { ToolUse = new ToolUseBlock
+                            {
+                                ToolUseId = "tool-use-id-1",
+                                Name = "TestPlugin-FindDocumentIdForTitle",
+                                Input = Document.FromObject(new Dictionary<string, object>
+                                {
+                                    ["title"] = "Green Eggs and Ham",
+                                }),
+                            } } ]
+                            },
+                        },
+                        Metrics = new ConverseMetrics(),
+                        StopReason = StopReason.Tool_use,
+                        Usage = new TokenUsage()
+                    }
+                    : this.CreateConverseResponse("Hello, world!", ConversationRole.Assistant);
+            });
+        var kernel = Kernel.CreateBuilder().AddBedrockChatCompletionService("amazon.titan-text-premier-v1:0", mockBedrockApi.Object).Build();
+        var plugin = new TestPlugin();
+        kernel.ImportPluginFromObject(plugin);
+        var chatHistory = new ChatHistory();
+        chatHistory.AddUserMessage("Find the ID corresponding to the title 'Green Eggs and Ham', by Dr. Suess.");
+        var service = kernel.GetRequiredService<IChatCompletionService>();
+        var executionSettings = new AmazonClaudeExecutionSettings
+        {
+            ModelId = "amazon.titan-text-premier-v1:0",
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
+        };
+
+        // Act
+        var result = await service.GetChatMessageContentsAsync(chatHistory, executionSettings, kernel, CancellationToken.None).ConfigureAwait(true);
+
+        Assert.NotNull(firstRequest?.ToolConfig);
+        Assert.NotNull(secondRequest?.Messages.Last().Content?.FirstOrDefault(c => c.ToolResult != null));
+    }
+
+    [Fact(Skip = "This test is missing the binary stream containing the delta block events with tool use needed to test this API")]
+    public async Task ShouldHandleToolsInConverseStreamingRequestAsync()
+    {
+        // Arrange
+        ConverseStreamRequest? firstRequest = null;
+        ConverseStreamRequest? secondRequest = null;
+        var mockBedrockApi = new Mock<IAmazonBedrockRuntime>();
+        mockBedrockApi.Setup(m => m.DetermineServiceOperationEndpoint(It.IsAny<ConverseStreamRequest>()))
+            .Returns(new Endpoint("https://bedrock-runtime.us-east-1.amazonaws.com")
+            {
+                URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
+            });
+        List<IEventStreamEvent> firstSequence = [
+            new ContentBlockStartEvent
+            {
+                ContentBlockIndex = 0,
+                Start = new ContentBlockStart
+                {
+                    ToolUse = new ToolUseBlockStart
+                    {
+                        ToolUseId = "tool-use-id-1",
+                        Name = "TestPlugin-FindDocumentIdForTitle",
+                    }
+                }
+            },
+            new ContentBlockDeltaEvent
+            {
+                ContentBlockIndex = 1,
+                Delta = new ContentBlockDelta
+                {
+                    ToolUse = new ToolUseBlockDelta
+                    {
+                        Input = """
+                                {
+                                    "title": "Green Eggs and Ham"
+                                }
+                                """,
+                    }
+                }
+            },
+            new ContentBlockStopEvent
+            {
+                ContentBlockIndex = 2,
+            }
+        ];
+        mockBedrockApi.Setup(m => m.ConverseStreamAsync(It.IsAny<ConverseStreamRequest>(), It.IsAny<CancellationToken>()))
+            .Callback((ConverseStreamRequest request, CancellationToken token) =>
+            {
+                if (firstRequest == null)
+                {
+                    firstRequest = request;
+                }
+                else
+                {
+                    secondRequest = request;
+                }
+            })
+            .ReturnsAsync((ConverseStreamRequest request, CancellationToken _) =>
+            {
+                return new ConverseStreamResponse
+                {
+                    HttpStatusCode = System.Net.HttpStatusCode.OK,
+                    // TODO: Replace with actual stream containing the delta block events with tool use
+                    Stream = new ConverseStreamOutput(new MemoryStream())
+                };
+            });
+
+        var kernel = Kernel.CreateBuilder().AddBedrockChatCompletionService("amazon.titan-text-premier-v1:0", mockBedrockApi.Object).Build();
+        var chatHistory = new ChatHistory();
+        chatHistory.AddUserMessage("Stream the ID corresponding to the title 'Green Eggs and Ham', by Dr. Suess.");
+        var service = kernel.GetRequiredService<IChatCompletionService>();
+        var executionSettings = new AmazonClaudeExecutionSettings
+        {
+            ModelId = "amazon.titan-text-premier-v1:0",
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
+        };
+
+        // Act
+        var result = service.GetStreamingChatMessageContentsAsync(chatHistory, executionSettings, kernel, CancellationToken.None).ConfigureAwait(true);
+        var stream = new List<StreamingChatMessageContent>();
+        await foreach (var msg in result)
+        {
+            stream.Add(msg);
+        }
+
+        // Assert
+        Assert.NotNull(firstRequest?.ToolConfig);
+        Assert.NotNull(secondRequest?.Messages.Last().Content?.FirstOrDefault(c => c.ToolResult != null));
     }
 
     private static ChatHistory CreateSampleChatHistory()
