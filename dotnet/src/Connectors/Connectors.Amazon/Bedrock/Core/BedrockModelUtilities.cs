@@ -51,7 +51,6 @@ internal static class BedrockModelUtilities
         MovMimeType
     ];
 
-
     /// <summary>
     /// Maps the AuthorRole to the corresponding ConversationRole because AuthorRole is static and { readonly get; }. Only called if AuthorRole is User or Assistant (System set outside/beforehand).
     /// </summary>
@@ -159,7 +158,6 @@ internal static class BedrockModelUtilities
             }
         };
     }
-
 
     private static IEnumerable<ToolResultContentBlock> ConvertResultToToolResultContentBlocks(object? result)
     {
