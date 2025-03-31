@@ -233,9 +233,9 @@ internal sealed class BedrockClientUtilities
         {
             var funcName = FunctionName.Parse(contentBlock.ToolUse.Name);
             var args = new KernelArguments();
-            foreach (var (k, v) in contentBlock.ToolUse.Input.AsDictionary())
+            foreach (var kv in contentBlock.ToolUse.Input.AsDictionary())
             {
-                args[k] = ConvertDocument(v);
+                args[kv.Key] = ConvertDocument(kv.Value);
             }
             return new FunctionCallContent(funcName.Name, funcName.PluginName, contentBlock.ToolUse.ToolUseId, args);
         }

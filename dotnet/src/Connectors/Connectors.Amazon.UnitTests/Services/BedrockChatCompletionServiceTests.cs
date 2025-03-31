@@ -463,8 +463,10 @@ public sealed class BedrockChatCompletionServiceTests
         }
     }
 
-    [Fact]
-    public async Task ShouldHandleToolsInConverseRequestAsync()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ShouldHandleToolsInConverseRequestAsync(bool required)
     {
         // Arrange
         ConverseRequest? firstRequest = null;
@@ -520,16 +522,23 @@ public sealed class BedrockChatCompletionServiceTests
         var chatHistory = new ChatHistory();
         chatHistory.AddUserMessage("Find the ID corresponding to the title 'Green Eggs and Ham', by Dr. Suess.");
         var service = kernel.GetRequiredService<IChatCompletionService>();
-        var executionSettings = new AmazonClaudeExecutionSettings
-        {
-            ModelId = "amazon.titan-text-premier-v1:0",
-            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
-        };
+        var executionSettings = AmazonClaudeExecutionSettings.FromExecutionSettings(null);
+        executionSettings.FunctionChoiceBehavior = required ? FunctionChoiceBehavior.Required() : FunctionChoiceBehavior.Auto();
 
         // Act
         var result = await service.GetChatMessageContentsAsync(chatHistory, executionSettings, kernel, CancellationToken.None).ConfigureAwait(true);
 
         Assert.NotNull(firstRequest?.ToolConfig);
+        if (required)
+        {
+            Assert.NotNull(firstRequest.ToolConfig.ToolChoice);
+            Assert.Null(firstRequest.ToolConfig.ToolChoice.Auto);
+            Assert.Equal("TestPlugin-FindDocumentIdForTitle", firstRequest.ToolConfig.ToolChoice?.Tool?.Name);
+        }
+        else // auto
+        {
+            Assert.NotNull(firstRequest.ToolConfig.ToolChoice?.Auto);
+        }
         Assert.NotNull(secondRequest?.Messages.Last().Content?.FirstOrDefault(c => c.ToolResult != null));
     }
 

@@ -10,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime.Documents;
+using Amazon.Util.Internal;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -82,7 +84,7 @@ internal sealed class BedrockChatCompletionClient
             using var activity = ModelDiagnostics.StartCompletionActivity(
                 this._chatGenerationEndpoint, this._modelId, this._modelProvider, workingHistory, executionSettings);
             ActivityStatusCode activityStatus;
-            var (invokeFunctionsIfPresent, cfg, toolConfig) = ConfigureToolSpec(workingHistory, kernel, executionSettings);
+            var (invokeFunctionsIfPresent, cfg, toolConfig) = ConfigureToolSpec(workingHistory, kernel, executionSettings, requestIndex);
             converseRequest.ToolConfig = toolConfig;
             try
             {
@@ -195,7 +197,8 @@ internal sealed class BedrockChatCompletionClient
         var itemCollection = new ChatMessageContentItemCollection();
         itemCollection.AddRange(contentBlocks
             .Where(BedrockClientUtilities.CanConvertContentBlock)
-            .Select(BedrockClientUtilities.ConvertContentBlock));
+            .Select(BedrockClientUtilities.ConvertContentBlock)
+            );
         return itemCollection;
     }
 
@@ -210,7 +213,7 @@ internal sealed class BedrockChatCompletionClient
         for (var requestIndex = 0; ; ++requestIndex)
         {
             var converseStreamRequest = this._ioChatService.GetConverseStreamRequest(this._modelId, workingHistory, executionSettings);
-            var (invokeFunctionsIfPresent, cfg, toolConfig) = ConfigureToolSpec(workingHistory, kernel, executionSettings);
+            var (invokeFunctionsIfPresent, cfg, toolConfig) = ConfigureToolSpec(workingHistory, kernel, executionSettings, requestIndex);
             converseStreamRequest.ToolConfig = toolConfig;
             if (this._chatGenerationEndpoint == null)
             {
@@ -365,7 +368,7 @@ internal sealed class BedrockChatCompletionClient
         }
     }
 
-    private static (bool, FunctionChoiceBehaviorConfiguration?, ToolConfiguration?) ConfigureToolSpec(ChatHistory chatHistory, Kernel? kernel, PromptExecutionSettings? executionSettings)
+    private static (bool, FunctionChoiceBehaviorConfiguration?, ToolConfiguration?) ConfigureToolSpec(ChatHistory chatHistory, Kernel? kernel, PromptExecutionSettings? executionSettings, int requestIndex = 0)
     {
         var invokeFunctionsIfPresent = false;
         FunctionChoiceBehaviorConfiguration? cfg = null;
@@ -381,28 +384,28 @@ internal sealed class BedrockChatCompletionClient
             };
             cfg = executionSettings.FunctionChoiceBehavior.GetConfiguration(ctx);
             invokeFunctionsIfPresent = cfg.AutoInvoke;
-            var toolSpecs = cfg.Functions?.Select(f => new { Schema = f.Metadata.ToJsonSchemaFunctionView(), Function = f }).ToList() ?? [];
+            var toolSpecs = cfg.Functions.Select(f => new { AIFunction = f.AsAIFunction(kernel), Function = f }).ToList() ?? [];
             toolConfig = new ToolConfiguration
             {
                 Tools = [.. toolSpecs.Select(m => new Tool
                 {
                     ToolSpec = new ToolSpecification
                     {
-                        Name = m.Schema.Name,
-                        Description = m.Schema.Description,
+                        Name = m.Function.Name,
+                        Description = m.Function.Description,
                         InputSchema = new ToolInputSchema
                         {
-                            Json = m.Schema.ToString(),
+                            Json = Document.FromObject(m.AIFunction.JsonSchema),
                         },
                     }
                 })],
                 ToolChoice = new ToolChoice
                 {
-                    Auto = cfg.Choice == FunctionChoice.Auto ? new AutoToolChoice() : null,
-                    Tool = cfg.Choice == FunctionChoice.Required && toolSpecs.Count > 0 ? new SpecificToolChoice
+                    Auto = cfg.Choice == FunctionChoice.Auto || requestIndex > 0 || toolSpecs.Count == 0 ? new AutoToolChoice() : null,
+                    Tool = cfg.Choice == FunctionChoice.Required && toolSpecs.Count > 0 && requestIndex == 0 ? new SpecificToolChoice
                     {
                         // The API only supports one tool that can be forced for calling, so we take the first one
-                        Name = toolSpecs.First().Schema.Name,
+                        Name = toolSpecs[0].Function.Name,
                     } : null,
                 }
             };

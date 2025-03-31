@@ -302,7 +302,18 @@ internal static class BedrockModelUtilities
                 return null;
             })
             .Where(item => item != null)
-            .Select(item => item!);
+            .Select(item => item!)
+            // For some reason, tool results have to be the first content blocks in the message
+            .OrderBy(item => item.ToolResult != null ? 1 : !string.IsNullOrWhiteSpace(item.Text) ? 2 : 3);
+    }
+
+    private static bool IsContentEmpty(ChatMessageContent message)
+    {
+        if (!string.IsNullOrWhiteSpace(message.Content))
+        {
+            return false;
+        }
+        return message.Items.Count == 0;
     }
 
     /// <summary>
@@ -315,12 +326,9 @@ internal static class BedrockModelUtilities
     {
         // Check that the text from the latest message in the chat history  is not empty.
         Verify.NotNullOrEmpty(chatHistory);
-        string? text = chatHistory[chatHistory.Count - 1].Content;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            throw new ArgumentException("Last message in chat history was null or whitespace.");
-        }
-        return [.. chatHistory
+        return IsContentEmpty(chatHistory[^1])
+            ? throw new ArgumentException("Last message in chat history was empty.")
+            : [.. chatHistory
             .Where(m => m.Role != AuthorRole.System)
             .Select(m => new Message
             {
