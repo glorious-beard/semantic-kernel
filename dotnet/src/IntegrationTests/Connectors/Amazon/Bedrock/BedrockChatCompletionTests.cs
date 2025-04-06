@@ -119,9 +119,13 @@ public class BedrockChatCompletionTests
     }
 
     [Theory(Skip = "For manual verification only")]
-    [InlineData("anthropic.claude-3-5-sonnet-20241022-v2:0", 3)]
-    public async Task ChatWithToolsReturnsValidResponseAsync(string modelId, int expectedResponseCount)
+    [InlineData("anthropic.claude-3-5-sonnet-20241022-v2:0")]
+    [InlineData("anthropic.claude-3-5-sonnet-20240620-v1:0")]
+    public async Task ChatWithClaudeUsingToolsReturnsValidResponseAsync(string modelId)
     {
+        // This test is only for Claude 3.5
+        Assert.Contains("anthropic.claude-3", modelId);
+
         // Arrange
         var chatHistory = new ChatHistory();
         chatHistory.AddUserMessage("I'm looking for a document titled \"Green Eggs and Ham\". I need to get it's ID so that I can submit it to the library for retrieval. Can you get me it's ID? I've provided a tool that you can use to look up the document ID.");
@@ -129,25 +133,11 @@ public class BedrockChatCompletionTests
         var kernel = Kernel.CreateBuilder().AddBedrockChatCompletionService(modelId).Build();
         kernel.ImportPluginFromObject(new TestPlugin(), "TestPlugin");
         var chatCompletionService = kernel.GetRequiredService<IChatCompletionService>();
-        var executionSettings = GetPromptExecutionSettings(modelId);
-        if (executionSettings != null)
-        {
-            executionSettings.FunctionChoiceBehavior = FunctionChoiceBehavior.Required();
-        }
+        var executionSettings = AmazonClaudeExecutionSettings.FromExecutionSettings(null);
+        executionSettings.FunctionChoiceBehavior = FunctionChoiceBehavior.Required();
 
         // Act
         var responses = await chatCompletionService.GetChatMessageContentsAsync(chatHistory, executionSettings, kernel).ConfigureAwait(true);
-        Assert.Equal(expectedResponseCount, responses.Count);
-    }
-
-    private static PromptExecutionSettings? GetPromptExecutionSettings(string model)
-    {
-        if (model.Contains("anthropic.claude", StringComparison.InvariantCultureIgnoreCase))
-        {
-            var s = AmazonClaudeExecutionSettings.FromExecutionSettings(null);
-            s.FunctionChoiceBehavior = FunctionChoiceBehavior.Auto();
-            return s;
-        }
-        return null;
+        Assert.Equal(3, responses.Count);
     }
 }

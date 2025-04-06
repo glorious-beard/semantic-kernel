@@ -11,13 +11,11 @@ using System.Threading.Tasks;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
 using Amazon.Runtime.Documents;
-using Amazon.Util.Internal;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.FunctionCalling;
 using Microsoft.SemanticKernel.Diagnostics;
-using Microsoft.SemanticKernel.Planning;
 
 namespace Microsoft.SemanticKernel.Connectors.Amazon.Core;
 
@@ -124,7 +122,7 @@ internal sealed class BedrockChatCompletionClient
                 activity?.SetCompletionTokenUsage(response?.Usage?.OutputTokens ?? default);
             }
 
-            var localChatMessages = this.ConvertToMessageContent(response).ToList();
+            var responseChatMessage = this.ConvertToMessageContent(response);
 
             // We're done if any of the conditions for invoking tool calls aren't met
             if (!invokeFunctionsIfPresent ||
@@ -132,41 +130,42 @@ internal sealed class BedrockChatCompletionClient
                 executionSettings == null ||
                 cfg == null ||
                 response.StopReason != StopReason.Tool_use ||
-                localChatMessages.All(m => m.Role != AuthorRole.Tool))
+                responseChatMessage.Role != AuthorRole.Tool)
             {
-                chatMessages.AddRange(localChatMessages);
-                break;
+                return [responseChatMessage];
             }
 
-            var originalLength = workingHistory.Count;
+            var processor = new FunctionCallsProcessor(this._logger);
+            var last = await processor.ProcessFunctionCallsAsync(
+                    responseChatMessage,
+                    executionSettings,
+                    workingHistory,
+                    requestIndex,
+                    _ => true, // Assume every function is advertised for the model to use
+                    cfg.Options,
+                    kernel,
+                    isStreaming: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
-            foreach (var message in localChatMessages)
+            if (last != null)
             {
-                if (message.Role != AuthorRole.Tool)
-                {
-                    workingHistory.Add(message);
-                    continue;
-                }
-
-                var processor = new FunctionCallsProcessor(this._logger);
-                await processor.ProcessFunctionCallsAsync(
-                        message,
-                        executionSettings,
-                        workingHistory,
-                        requestIndex,
-                        _ => true, // Assume every function is advertised for the model to use
-                        cfg.Options,
-                        kernel,
-                        isStreaming: false,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                // NOTE: Above function also adds `message` as well as results to the history on our behalf
+                return [last];
             }
 
-            chatMessages.AddRange(workingHistory.Skip(originalLength));
+            // ProcessFunctionCallsAsync returns both the function call result and a text representation of the function call,
+            // which may cause issues w/ Bedrock (at least for Claude). So if there's both a function call result and a text
+            // result, we need to remove the text result from the response.
+            if (workingHistory.LastOrDefault() is ChatMessageContent lastMessage && lastMessage != null && lastMessage.Items.Any(x => x is TextContent) && lastMessage.Items.Any(x => x is FunctionResultContent))
+            {
+                // Remove the text content from the last message
+                // NOTE: This assumes that there is only one TextContent in the last message.
+                // If there are multiple, we may need to adjust this logic.
+                // This is a workaround for a specific issue with Bedrock and Claude.
+                // In the future, we may want to handle this differently.
+                lastMessage.Items = [.. lastMessage.Items.Where(x => x is FunctionResultContent)];
+            }
         }
-
-        return chatMessages;
     }
 
     /// <summary>
@@ -174,22 +173,21 @@ internal sealed class BedrockChatCompletionClient
     /// </summary>
     /// <param name="response"> ConverseResponse object outputted by Bedrock. </param>
     /// <returns>List of ChatMessageContent objects</returns>
-    private ChatMessageContent[] ConvertToMessageContent(ConverseResponse response)
+    private ChatMessageContent ConvertToMessageContent(ConverseResponse response)
     {
         if (response.Output.Message == null)
         {
-            return [];
+            this._logger.LogWarning("Response does not contain a message. Returning empty empty response.");
+            return new ChatMessageContent();
         }
+
         var message = response.Output.Message;
-        return
-        [
-            new ChatMessageContent
-            {
-                Role = message.Content.Any(c => c.ToolUse != null) ? AuthorRole.Tool : BedrockClientUtilities.MapConversationRoleToAuthorRole(message.Role.Value),
-                Items = CreateChatMessageContentItemCollection(message.Content),
-                InnerContent = response
-            }
-        ];
+        return new ChatMessageContent
+        {
+            Role = message.Content.Any(c => c.ToolUse != null) ? AuthorRole.Tool : BedrockClientUtilities.MapConversationRoleToAuthorRole(message.Role.Value),
+            Items = CreateChatMessageContentItemCollection(message.Content),
+            InnerContent = response
+        };
     }
 
     private static ChatMessageContentItemCollection CreateChatMessageContentItemCollection(List<ContentBlock> contentBlocks)
@@ -384,7 +382,14 @@ internal sealed class BedrockChatCompletionClient
             };
             cfg = executionSettings.FunctionChoiceBehavior.GetConfiguration(ctx);
             invokeFunctionsIfPresent = cfg.AutoInvoke;
-            var toolSpecs = cfg.Functions.Select(f => new { AIFunction = f.AsAIFunction(kernel), Function = f }).ToList() ?? [];
+            var toolSpecs = cfg.Functions?.Select(f => new { AIFunction = f.AsAIFunction(kernel), Function = f }).ToList() ?? [];
+            if (toolSpecs.Count == 0)
+            {
+                // No functions to call, so we don't need a tool config
+                return (false, null, null);
+            }
+
+            // We need to create a tool config
             toolConfig = new ToolConfiguration
             {
                 Tools = [.. toolSpecs.Select(m => new Tool

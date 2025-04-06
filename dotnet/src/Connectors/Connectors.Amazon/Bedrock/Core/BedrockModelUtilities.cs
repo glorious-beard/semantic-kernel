@@ -128,14 +128,14 @@ internal static class BedrockModelUtilities
             }
         };
     }
-    private static ToolResultContentBlock CreateDocumentContentBlock(DocumentFormat format, string ext, byte[] data)
+    private static ToolResultContentBlock CreateDocumentContentBlock(DocumentFormat format, byte[] data)
     {
         return new ToolResultContentBlock
         {
             Document = new DocumentBlock
             {
                 Format = format,
-                Name = $"document.{ext}",
+                Name = $"document-{Guid.NewGuid()}", // NOTE: Random generated name
                 Source = new DocumentSource
                 {
                     Bytes = new MemoryStream(data)
@@ -174,11 +174,11 @@ internal static class BedrockModelUtilities
                     JpegMimeType => CreateImageContentBlock(ImageFormat.Jpeg, bytes),
                     GifMimeType => CreateImageContentBlock(ImageFormat.Gif, bytes),
                     WebpMimeType => CreateImageContentBlock(ImageFormat.Webp, bytes),
-                    DocMimeType => CreateDocumentContentBlock(DocumentFormat.Doc, "doc", bytes),
-                    DocxMimeType => CreateDocumentContentBlock(DocumentFormat.Docx, "docx", bytes),
-                    PdfMimeType => CreateDocumentContentBlock(DocumentFormat.Pdf, "pdf", bytes),
-                    XlsMimeType => CreateDocumentContentBlock(DocumentFormat.Xls, "xls", bytes),
-                    XlsxMimeType => CreateDocumentContentBlock(DocumentFormat.Xlsx, "xlsx", bytes),
+                    DocMimeType => CreateDocumentContentBlock(DocumentFormat.Doc, bytes),
+                    DocxMimeType => CreateDocumentContentBlock(DocumentFormat.Docx, bytes),
+                    PdfMimeType => CreateDocumentContentBlock(DocumentFormat.Pdf, bytes),
+                    XlsMimeType => CreateDocumentContentBlock(DocumentFormat.Xls, bytes),
+                    XlsxMimeType => CreateDocumentContentBlock(DocumentFormat.Xlsx, bytes),
                     MpegMimeType => CreateVideoContentBlock(VideoFormat.Mpeg, bytes),
                     Mp4MimeType => CreateVideoContentBlock(VideoFormat.Mp4, bytes),
                     WebmMimeType => CreateVideoContentBlock(VideoFormat.Webm, bytes),
@@ -187,20 +187,23 @@ internal static class BedrockModelUtilities
                     _ => throw new InvalidOperationException($"Unsupported image format: '{match.Groups["type"].Value}'"),
                 };
             }
-
-            yield return new ToolResultContentBlock { Text = text };
+            else
+            {
+                yield return new ToolResultContentBlock { Text = text };
+            }
         }
-
-        if (result is Exception e)
+        else if (result is Exception e)
         {
             yield return new ToolResultContentBlock { Text = e.Message };
             yield return new ToolResultContentBlock { Text = e.StackTrace };
         }
-
-        yield return new ToolResultContentBlock
+        else
         {
-            Text = JsonSerializer.Serialize(result)
-        };
+            yield return new ToolResultContentBlock
+            {
+                Text = JsonSerializer.Serialize(result)
+            };
+        }
     }
 
     private static IEnumerable<ContentBlock> MessageContentItemsToContentBlock(ChatMessageContentItemCollection items)
@@ -259,7 +262,7 @@ internal static class BedrockModelUtilities
                         Document = new DocumentBlock
                         {
                             Format = DocumentFormat.Pdf,
-                            Name = $"document-{i + 1}.pdf",  // NOTE: Generated to prevent possibility of prompt injection attack
+                            Name = $"document-{i + 1}",  // NOTE: Generated to prevent possibility of prompt injection attack
                             Source = new DocumentSource
                             {
                                 Bytes = new MemoryStream(pdf.Data?.ToArray() ?? [])
@@ -275,7 +278,7 @@ internal static class BedrockModelUtilities
                         Document = new DocumentBlock
                         {
                             Format = DocumentFormat.Doc,
-                            Name = $"document-{i + 1}.doc",  // NOTE: Generated to prevent possibility of prompt injection attack
+                            Name = $"document-{i + 1}",  // NOTE: Generated to prevent possibility of prompt injection attack
                             Source = new DocumentSource
                             {
                                 Bytes = new MemoryStream(doc.Data?.ToArray() ?? [])
@@ -291,7 +294,7 @@ internal static class BedrockModelUtilities
                         Document = new DocumentBlock
                         {
                             Format = DocumentFormat.Docx,
-                            Name = $"document-{i + 1}.docx",  // NOTE: Generated to prevent possibility of prompt injection attack
+                            Name = $"document-{i + 1}",  // NOTE: Generated to prevent possibility of prompt injection attack
                             Source = new DocumentSource
                             {
                                 Bytes = new MemoryStream(docx.Data?.ToArray() ?? [])
