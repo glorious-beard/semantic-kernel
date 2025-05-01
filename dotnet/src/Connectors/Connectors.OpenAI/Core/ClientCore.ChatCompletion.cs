@@ -889,6 +889,16 @@ internal partial class ClientCore
         throw new ArgumentException($"{nameof(AudioContent)} must have Data bytes.");
     }
 
+    private static ChatMessageContentPart GetBinaryContentItem(BinaryContent binaryContent)
+    {
+        if (binaryContent.Data is { IsEmpty: false } data)
+        {
+            return ChatMessageContentPart.CreateFilePart(BinaryData.FromBytes(data), binaryContent.MimeType, Guid.NewGuid().ToString());
+        }
+
+        throw new ArgumentException($"{nameof(BinaryContent)} must have Data bytes.");
+    }
+
     private static ChatInputAudioFormat GetChatInputAudioFormat(string? mimeType)
     {
         if (string.IsNullOrWhiteSpace(mimeType))
